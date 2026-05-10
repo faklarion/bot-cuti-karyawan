@@ -108,17 +108,21 @@ def format_tanggal(date_str):
         return dt.strftime("%d %B %Y")
     except:
         return date_str
-
 def proses_ajukan_cuti(chat_id, karyawan, mulai, selesai):
     try:
         if not mulai or not selesai:
-            return "Mohon berikan tanggal mulai dan selesai cuti.\n\nContoh: saya mau cuti dari 2024-12-01 sampai 2024-12-05"
+            return ("Mohon berikan tanggal mulai dan selesai cuti.\n\n"
+                    "Contoh: saya mau cuti dari 2026-12-01 sampai 2026-12-05")
 
         if isinstance(mulai, list): mulai = mulai[0]
         if isinstance(selesai, list): selesai = selesai[0]
 
-        tgl_mulai = datetime.fromisoformat(mulai.replace("Z", ""))
-        tgl_selesai = datetime.fromisoformat(selesai.replace("Z", ""))
+        # Handle format tanggal dari Dialogflow
+        if isinstance(mulai, dict): mulai = mulai.get("startDate", mulai.get("date", ""))
+        if isinstance(selesai, dict): selesai = selesai.get("startDate", selesai.get("date", ""))
+
+        tgl_mulai = datetime.fromisoformat(str(mulai).replace("Z", "").strip())
+        tgl_selesai = datetime.fromisoformat(str(selesai).replace("Z", "").strip())
 
         if tgl_selesai < tgl_mulai:
             return "Tanggal selesai harus setelah tanggal mulai."
@@ -147,7 +151,9 @@ def proses_ajukan_cuti(chat_id, karyawan, mulai, selesai):
                 f"Status: Menunggu Persetujuan")
 
     except Exception as e:
+        import traceback
         print(f"Error ajukan cuti: {e}")
+        print(traceback.format_exc())
         return "Terjadi kesalahan saat mengajukan cuti."
 
 def proses_status_cuti(chat_id):
