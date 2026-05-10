@@ -5,8 +5,7 @@ import re
 import gspread
 from flask import Flask, request
 from google.oauth2.service_account import Credentials
-from datetime import datetime
-from dateutil import parser
+from datetime import datetime, timedelta
 import calendar
 
 app = Flask(__name__)
@@ -16,7 +15,6 @@ TOKEN = "8620563805:AAGQNY5h3rXTKj6DpI04vcXcHKC4axTwT0A"
 SPREADSHEET_ID = "1eBI6Dor4DiNczYOrpXQDiN6sXaRyAZg_ahCVV_1d_HE"
 DIALOGFLOW_PROJECT_ID = "newagent-enoo"
 
-# Service Account untuk Google Sheets & Dialogflow
 SERVICE_ACCOUNT_INFO = {
     "type": "service_account",
     "project_id": "newagent-enoo",
@@ -66,10 +64,9 @@ def get_karyawan(chat_id):
         print(f"Error get_karyawan: {e}")
         return None
 
-# ============ PARSING TANGGAL (PERBAIKAN UTAMA) ============
+# ============ PARSING TANGGAL ============
 def parse_tanggal_indonesia(text):
     """Mengekstrak tanggal dari teks bahasa Indonesia"""
-    # Pola: 1 Desember 2024, 12 Januari 2025, dll
     pattern = r'(\d{1,2})\s+(januari|februari|maret|april|mei|juni|juli|agustus|september|oktober|november|desember|jan|feb|mar|apr|jun|jul|agu|sep|okt|nov|des)\s+(\d{4})'
     matches = re.findall(pattern, text.lower())
     
@@ -81,20 +78,17 @@ def parse_tanggal_indonesia(text):
             if 1 <= hari <= 31 and 1 <= bulan <= 12 and tahun > 2000:
                 return f"{tahun}-{bulan:02d}-{hari:02d}"
     
-    # Pola: 12-01-2024, 12/01/2024, 12.01.2024
     pattern2 = r'(\d{1,2})[-/\.](\d{1,2})[-/\.](\d{4})'
     matches2 = re.findall(pattern2, text)
     
     if matches2:
         for match in matches2:
-            # Coba interpretasi sebagai DD-MM-YYYY
             hari = int(match[0])
             bulan = int(match[1])
             tahun = int(match[2])
             if 1 <= hari <= 31 and 1 <= bulan <= 12:
                 return f"{tahun}-{bulan:02d}-{hari:02d}"
     
-    # Pola: 2024-12-01 (ISO)
     pattern3 = r'(\d{4})-(\d{2})-(\d{2})'
     matches3 = re.findall(pattern3, text)
     
@@ -110,7 +104,6 @@ def parse_tanggal_indonesia(text):
 
 def extract_two_dates(text):
     """Ekstrak dua tanggal dari teks (mulai dan selesai)"""
-    # Cari pola "dari [tanggal] sampai [tanggal]"
     pattern = r'dari\s+(.+?)\s+sampai\s+(.+)'
     match = re.search(pattern, text.lower())
     
@@ -118,23 +111,19 @@ def extract_two_dates(text):
         tgl1_str = match.group(1).strip()
         tgl2_str = match.group(2).strip()
         
-        # Ekstrak tanggal dari masing-masing string
         tgl1 = parse_tanggal_indonesia(tgl1_str)
         tgl2 = parse_tanggal_indonesia(tgl2_str)
         
         if tgl1 and tgl2:
             return tgl1, tgl2
     
-    # Cari semua tanggal dalam teks
     semua_tanggal = []
     for word in text.split():
         parsed = parse_tanggal_indonesia(word)
         if parsed:
             semua_tanggal.append(parsed)
     
-    # Coba juga cari di seluruh teks
     if not semua_tanggal:
-        # Cari pola tanggal dalam kalimat
         pattern_tanggal = r'(\d{1,2}\s+\w+\s+\d{4})'
         tanggals = re.findall(pattern_tanggal, text, re.IGNORECASE)
         for t in tanggals:
@@ -172,12 +161,10 @@ def detect_intent(chat_id, text):
         }
         response = requests.post(url, headers=headers, json=payload)
         result = response.json()
-        print(f"Dialogflow result: {json.dumps(result, indent=2)}")
 
         intent = result.get("queryResult", {}).get("intent", {}).get("displayName", "Default Fallback Intent")
         params = result.get("queryResult", {}).get("parameters", {})
         
-        # Parse parameters dari Dialogflow
         parsed_params = {}
         for key, value in params.items():
             if isinstance(value, dict):
@@ -194,9 +181,7 @@ def detect_intent(chat_id, text):
         return intent, parsed_params, fulfillment
 
     except Exception as e:
-        import traceback
         print(f"Error detect_intent: {e}")
-        print(traceback.format_exc())
         return "Default Fallback Intent", {}, "Maaf, terjadi kesalahan."
 
 # ============ TELEGRAM ============
@@ -211,7 +196,7 @@ def send_telegram(chat_id, text):
     except Exception as e:
         print(f"Error send_telegram: {e}")
 
-# ============ PROSES INTENT ============
+# ============ PROSES CUTI DENGAN VALIDASI ============
 def proses_ajukan_cuti(chat_id, karyawan, mulai, selesai):
     try:
         if not mulai or not selesai:
@@ -235,62 +220,57 @@ def proses_ajukan_cuti(chat_id, karyawan, mulai, selesai):
 
         # ============ VALIDASI TANGGAL ============
         
-        # 1. Validasi tanggal tidak boleh hari ini atau yang sudah lewat
         today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
         tgl_mulai_tanpa_waktu = tgl_mulai.replace(hour=0, minute=0, second=0, microsecond=0)
         
+        # Validasi 1: Tanggal tidak boleh lewat
         if tgl_mulai_tanpa_waktu < today:
             return f"❌ Tanggal mulai cuti *{tgl_mulai.strftime('%d %B %Y')}* sudah lewat.\n\n📌 Cuti harus diajukan minimal H-1 (satu hari sebelum tanggal cuti)."
         
-        # 2. Validasi tanggal mulai tidak boleh sama dengan hari ini (opsional, bisa diatur)
+        # Validasi 2: Tanggal tidak boleh hari ini
         if tgl_mulai_tanpa_waktu == today:
             return f"❌ Tanggal mulai cuti *{tgl_mulai.strftime('%d %B %Y')}* adalah hari ini.\n\n📌 Pengajuan cuti harus dilakukan *minimal 1 hari sebelum* tanggal cuti dimulai."
         
-        # 3. Validasi tanggal selesai harus setelah tanggal mulai
+        # Validasi 3: Tanggal selesai harus setelah tanggal mulai
         if tgl_selesai < tgl_mulai:
             return "❌ Tanggal selesai harus *setelah* tanggal mulai."
 
-        # 4. Validasi tanggal mulai tidak boleh lebih dari 1 tahun ke depan
+        # Validasi 4: Maksimal 1 tahun ke depan
         max_date = today.replace(year=today.year + 1)
         if tgl_mulai > max_date:
             return f"❌ Tanggal mulai cuti *{tgl_mulai.strftime('%d %B %Y')}* terlalu jauh.\n\n📌 Maksimal pengajuan cuti adalah 1 tahun ke depan."
 
-        # 5. Validasi durasi cuti maksimal (misal: maksimal 14 hari berturut-turut)
+        # Validasi 5: Durasi cuti maksimal 14 hari
         MAX_HARI_CUTI_BERTURUT = 14
         jumlah_hari = (tgl_selesai - tgl_mulai).days + 1
         
         if jumlah_hari > MAX_HARI_CUTI_BERTURUT:
             return f"❌ Durasi cuti *{jumlah_hari} hari* melebihi batas maksimal *{MAX_HARI_CUTI_BERTURUT} hari* berturut-turut."
 
-        # 6. Validasi sisa cuti mencukupi
+        # Validasi 6: Sisa cuti mencukupi
         if jumlah_hari > karyawan["sisa_cuti"]:
             return f"❌ Maaf, sisa cuti Anda hanya *{karyawan['sisa_cuti']} hari*, tidak cukup untuk *{jumlah_hari} hari*."
 
-        # 7. Validasi tidak ada cuti yang bentrok (opsional)
-        # Cek apakah sudah ada pengajuan cuti di tanggal yang sama
+        # Validasi 7: Cek bentrok dengan pengajuan cuti lain
         sheet_pengajuan = get_sheet("PengajuanCuti")
         data_pengajuan = sheet_pengajuan.get_all_values()
         
         for row in data_pengajuan[1:]:
             if len(row) >= 5 and str(row[1]) == str(chat_id):
-                existing_mulai = datetime.strptime(row[3], "%Y-%m-%d")
-                existing_selesai = datetime.strptime(row[4], "%Y-%m-%d")
-                
-                # Cek apakah tanggal bentrok
-                if (tgl_mulai <= existing_selesai and tgl_selesai >= existing_mulai):
-                    return (f"❌ *Bentrok dengan pengajuan cuti sebelumnya!*\n\n"
-                            f"Anda sudah mengajukan cuti pada:\n"
-                            f"📅 {existing_mulai.strftime('%d %B %Y')} → {existing_selesai.strftime('%d %B %Y')}\n\n"
-                            f"Silakan ajukan cuti di luar periode tersebut.")
+                try:
+                    existing_mulai = datetime.strptime(row[3], "%Y-%m-%d")
+                    existing_selesai = datetime.strptime(row[4], "%Y-%m-%d")
+                    
+                    if (tgl_mulai <= existing_selesai and tgl_selesai >= existing_mulai):
+                        return (f"❌ *Bentrok dengan pengajuan cuti sebelumnya!*\n\n"
+                                f"Anda sudah mengajukan cuti pada:\n"
+                                f"📅 {existing_mulai.strftime('%d %B %Y')} → {existing_selesai.strftime('%d %B %Y')}\n\n"
+                                f"Silakan ajukan cuti di luar periode tersebut.")
+                except:
+                    pass
 
-        # 8. Validasi tidak ada cuti di hari libur nasional (opsional, bisa ditambahkan nanti)
-        # if is_libur_nasional(tgl_mulai, tgl_selesai):
-        #     return "❌ Maaf, tanggal yang Anda pilih bertepatan dengan hari libur nasional."
-
-        # === SEMUA VALIDASI LOLOS ===
-        
-        sheet = get_sheet("PengajuanCuti")
-        sheet.append_row([
+        # SEMUA VALIDASI LOLOS
+        sheet_pengajuan.append_row([
             datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             str(chat_id),
             karyawan["nama"],
@@ -305,29 +285,13 @@ def proses_ajukan_cuti(chat_id, karyawan, mulai, selesai):
                 f"📅 Mulai: {tgl_mulai.strftime('%d %B %Y')}\n"
                 f"📅 Selesai: {tgl_selesai.strftime('%d %B %Y')}\n"
                 f"📊 Jumlah: {jumlah_hari} hari\n"
-                f"⏳ Status: Menunggu Persetujuan\n\n"
-                f"📌 *Catatan:* Pengajuan akan diproses oleh atasan Anda.")
+                f"⏳ Status: Menunggu Persetujuan")
 
     except Exception as e:
         import traceback
         print(f"Error ajukan cuti: {e}")
         print(traceback.format_exc())
         return f"❌ Terjadi kesalahan: {str(e)}"
-
-def is_weekend(date):
-    """Cek apakah tanggal adalah weekend (Sabtu=5, Minggu=6)"""
-    return date.weekday() >= 5  # 5=Sabtu, 6=Minggu
-
-# Tambahkan di validasi:
-weekend_count = 0
-current_date = tgl_mulai
-while current_date <= tgl_selesai:
-    if is_weekend(current_date):
-        weekend_count += 1
-    current_date += timedelta(days=1)
-
-if weekend_count == jumlah_hari:
-    return "❌ Maaf, cuti tidak dapat diajukan pada hari Sabtu dan Minggu.\n\n📌 Silakan pilih hari kerja."
 
 def proses_status_cuti(chat_id):
     try:
@@ -368,11 +332,9 @@ def process_intent(chat_id, intent, params, fulfillment, original_text=""):
         return f"👋 Halo {karyawan['nama']}!\n\n📊 *Sisa cuti Anda: {karyawan['sisa_cuti']} hari*"
 
     elif intent == "ajukan_cuti":
-        # Ambil tanggal dari params atau dari teks asli
         mulai = params.get("tanggal_mulai") or params.get("date") or params.get("startDate")
         selesai = params.get("tanggal_selesai") or params.get("date-range") or params.get("endDate")
         
-        # Jika tidak ada dari Dialogflow, ekstrak dari teks asli
         if not mulai or not selesai:
             mulai, selesai = extract_two_dates(original_text)
             print(f"Extracted from text: mulai={mulai}, selesai={selesai}")
@@ -410,7 +372,6 @@ def webhook():
         chat_id = data["message"]["chat"]["id"]
         text = data["message"]["text"]
 
-        # Handle /start
         if text == "/start":
             karyawan = get_karyawan(chat_id)
             if karyawan:
@@ -428,7 +389,6 @@ def webhook():
                 send_telegram(chat_id, f"❌ Data karyawan tidak ditemukan.\n\nTelegram ID Anda: `{chat_id}`\n\nSilakan hubungi admin untuk mendaftarkan ID ini.")
             return "ok", 200
 
-        # Handle bantuan
         if text.lower() in ["bantuan", "help", "/help"]:
             send_telegram(chat_id,
                 "🤖 *Bantuan Bot Cuti*\n\n"
@@ -448,12 +408,10 @@ def webhook():
             )
             return "ok", 200
 
-        # Kirim ke Dialogflow
         intent, params, fulfillment = detect_intent(chat_id, text)
         print(f"Intent: {intent}")
         print(f"Params: {params}")
 
-        # Proses intent
         response_text = process_intent(chat_id, intent, params, fulfillment, text)
         print(f"Response: {response_text}")
         send_telegram(chat_id, response_text)
