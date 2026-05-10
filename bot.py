@@ -201,22 +201,87 @@ def proses_ajukan_cuti(chat_id, karyawan, mulai, selesai):
     try:
         if not mulai or not selesai:
             return ("❌ Mohon berikan tanggal mulai dan selesai cuti.\n\n"
-                    "Contoh: *saya mau cuti dari 1 Desember 2024 sampai 5 Desember 2024*")
+                    "Contoh: *saya mau cuti dari 1 Desember 2026 sampai 5 Desember 2026*")
+
+        # DEBUG: Cetak nilai asli
+        print(f"DEBUG: Raw mulai = {mulai}, type = {type(mulai)}")
+        print(f"DEBUG: Raw selesai = {selesai}, type = {type(selesai)}")
 
         # Pastikan format tanggal benar
         if isinstance(mulai, dict):
-            mulai = mulai.get("startDate", mulai.get("stringValue", str(mulai)))
+            # Coba ambil dari berbagai kemungkinan key
+            mulai = mulai.get("startDate") or mulai.get("stringValue") or mulai.get("date") or str(mulai)
         if isinstance(selesai, dict):
-            selesai = selesai.get("endDate", selesai.get("stringValue", str(selesai)))
+            selesai = selesai.get("endDate") or selesai.get("stringValue") or selesai.get("date") or str(selesai)
         
-        # Ambil hanya YYYY-MM-DD
-        mulai_str = str(mulai)[:10]
-        selesai_str = str(selesai)[:10]
+        # Konversi ke string
+        mulai_str = str(mulai)
+        selesai_str = str(selesai)
         
-        print(f"Processing cuti: mulai={mulai_str}, selesai={selesai_str}")
+        print(f"DEBUG: After dict check - mulai_str = {mulai_str}")
+        print(f"DEBUG: After dict check - selesai_str = {selesai_str}")
         
-        tgl_mulai = datetime.strptime(mulai_str, "%Y-%m-%d")
-        tgl_selesai = datetime.strptime(selesai_str, "%Y-%m-%d")
+        # Ekstrak tahun dari string menggunakan regex
+        import re
+        
+        # Cari tahun 4 digit (2024, 2025, 2026, dll)
+        tahun_mulai_match = re.search(r'(202\d|203\d)', mulai_str)
+        tahun_selesai_match = re.search(r'(202\d|203\d)', selesai_str)
+        
+        if tahun_mulai_match:
+            tahun_mulai = tahun_mulai_match.group(1)
+            print(f"DEBUG: Found tahun mulai = {tahun_mulai}")
+        else:
+            tahun_mulai = None
+            
+        if tahun_selesai_match:
+            tahun_selesai = tahun_selesai_match.group(1)
+            print(f"DEBUG: Found tahun selesai = {tahun_selesai}")
+        else:
+            tahun_selesai = None
+        
+        # Bersihkan string tanggal (hapus teks yang tidak perlu)
+        # Format dari Dialogflow biasanya: "2026-12-01T00:00:00+07:00" atau "2026-12-01"
+        if 'T' in mulai_str:
+            mulai_str = mulai_str.split('T')[0]
+        if 'T' in selesai_str:
+            selesai_str = selesai_str.split('T')[0]
+        
+        # Jika mulai_str masih panjang, ekstrak YYYY-MM-DD
+        match_mulai = re.search(r'(\d{4})-(\d{2})-(\d{2})', mulai_str)
+        match_selesai = re.search(r'(\d{4})-(\d{2})-(\d{2})', selesai_str)
+        
+        if match_mulai:
+            tahun = int(match_mulai.group(1))
+            bulan = int(match_mulai.group(2))
+            hari = int(match_mulai.group(3))
+            tgl_mulai = datetime(tahun, bulan, hari)
+            print(f"DEBUG: Parsed mulai = {tgl_mulai}")
+        else:
+            # Fallback ke parsing biasa
+            tgl_mulai = datetime.strptime(mulai_str[:10], "%Y-%m-%d")
+            
+        if match_selesai:
+            tahun = int(match_selesai.group(1))
+            bulan = int(match_selesai.group(2))
+            hari = int(match_selesai.group(3))
+            tgl_selesai = datetime(tahun, bulan, hari)
+            print(f"DEBUG: Parsed selesai = {tgl_selesai}")
+        else:
+            tgl_selesai = datetime.strptime(selesai_str[:10], "%Y-%m-%d")
+        
+        # Jika tahun masih 2024 tapi user minta 2026, gunakan tahun dari text asli
+        # (Ini untuk handle kasus Dialogflow kasih default 2024)
+        if tahun_mulai and tgl_mulai.year == 2024 and tahun_mulai != '2024':
+            tgl_mulai = tgl_mulai.replace(year=int(tahun_mulai))
+            print(f"DEBUG: Corrected tahun mulai to {tahun_mulai}")
+        
+        if tahun_selesai and tgl_selesai.year == 2024 and tahun_selesai != '2024':
+            tgl_selesai = tgl_selesai.replace(year=int(tahun_selesai))
+            print(f"DEBUG: Corrected tahun selesai to {tahun_selesai}")
+
+        print(f"DEBUG: Final tgl_mulai = {tgl_mulai}")
+        print(f"DEBUG: Final tgl_selesai = {tgl_selesai}")
 
         # ============ VALIDASI TANGGAL ============
         
