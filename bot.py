@@ -40,15 +40,19 @@ def get_karyawan(chat_id):
         sheet = get_sheet("Karyawan")
         data = sheet.get_all_values()
         chat_id_str = str(chat_id)
-        for row in data[1:]:
-            if len(row) >= 10 and str(row[5]).strip() == chat_id_str:
+        print(f"Total rows: {len(data)}")
+        print(f"Looking for chat_id: {chat_id_str}")
+        for i, row in enumerate(data[1:]):
+            print(f"Row {i}: {row}")
+            if len(row) >= 6 and str(row[5]).strip() == chat_id_str:
                 return {
                     "nama": row[2],
                     "jabatan": row[3],
                     "divisi": row[4],
                     "sisa_cuti": int(row[8]) if row[8] else 0,
-                    "atasan": row[9]
+                    "atasan": row[9] if len(row) > 9 else "-"
                 }
+        print("Karyawan tidak ditemukan")
         return None
     except Exception as e:
         print(f"Error get_karyawan: {e}")
