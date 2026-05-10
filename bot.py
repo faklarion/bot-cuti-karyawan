@@ -55,7 +55,9 @@ def get_karyawan(chat_id):
         print("Karyawan tidak ditemukan")
         return None
     except Exception as e:
+        import traceback
         print(f"Error get_karyawan: {e}")
+        print(traceback.format_exc())
         return None
 
 # ============ DIALOGFLOW ============
