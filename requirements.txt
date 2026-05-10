@@ -1,0 +1,5 @@
+flask
+requests
+google-auth
+gspread
+python-telegram-bot==13.15
