@@ -35,19 +35,15 @@ def get_sheet(sheet_name):
     client = gspread.authorize(creds)
     spreadsheet = client.open_by_key(SPREADSHEET_ID)
     return spreadsheet.worksheet(sheet_name)
-
 def extract_tanggal(text):
-    pattern_iso = r'\d{4}-\d{2}-\d{2}'
     pattern_dmy = r'\d{1,2}[-/]\d{1,2}[-/]\d{4}'
+    pattern_iso = r'\d{4}-\d{2}-\d{2}'
     
-    dates_iso = re.findall(pattern_iso, text)
     dates_dmy = re.findall(pattern_dmy, text)
+    dates_iso = re.findall(pattern_iso, text)
     
     def parse_tanggal(date_str):
-        try:
-            return datetime.strptime(date_str, "%Y-%m-%d").strftime("%Y-%m-%d")
-        except:
-            pass
+        # Coba D-M-YYYY dulu
         try:
             return datetime.strptime(date_str, "%d-%m-%Y").strftime("%Y-%m-%d")
         except:
@@ -56,9 +52,15 @@ def extract_tanggal(text):
             return datetime.strptime(date_str, "%d/%m/%Y").strftime("%Y-%m-%d")
         except:
             pass
+        # Terakhir baru ISO
+        try:
+            return datetime.strptime(date_str, "%Y-%m-%d").strftime("%Y-%m-%d")
+        except:
+            pass
         return None
 
-    all_dates = dates_iso + dates_dmy
+    # Prioritaskan DMY dulu baru ISO
+    all_dates = dates_dmy + dates_iso
     parsed = [parse_tanggal(d) for d in all_dates if parse_tanggal(d)]
     
     if len(parsed) >= 2:
