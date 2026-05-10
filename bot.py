@@ -1,6 +1,7 @@
 import os
 import json
 import requests
+import re
 import gspread
 from flask import Flask, request
 from google.oauth2.service_account import Credentials
@@ -34,6 +35,37 @@ def get_sheet(sheet_name):
     client = gspread.authorize(creds)
     spreadsheet = client.open_by_key(SPREADSHEET_ID)
     return spreadsheet.worksheet(sheet_name)
+
+def extract_tanggal(text):
+    pattern_iso = r'\d{4}-\d{2}-\d{2}'
+    pattern_dmy = r'\d{1,2}[-/]\d{1,2}[-/]\d{4}'
+    
+    dates_iso = re.findall(pattern_iso, text)
+    dates_dmy = re.findall(pattern_dmy, text)
+    
+    def parse_tanggal(date_str):
+        try:
+            return datetime.strptime(date_str, "%Y-%m-%d").strftime("%Y-%m-%d")
+        except:
+            pass
+        try:
+            return datetime.strptime(date_str, "%d-%m-%Y").strftime("%Y-%m-%d")
+        except:
+            pass
+        try:
+            return datetime.strptime(date_str, "%d/%m/%Y").strftime("%Y-%m-%d")
+        except:
+            pass
+        return None
+
+    all_dates = dates_iso + dates_dmy
+    parsed = [parse_tanggal(d) for d in all_dates if parse_tanggal(d)]
+    
+    if len(parsed) >= 2:
+        return parsed[0], parsed[1]
+    elif len(parsed) == 1:
+        return parsed[0], None
+    return None, None
 
 def get_karyawan(chat_id):
     try:
@@ -108,21 +140,22 @@ def format_tanggal(date_str):
         return dt.strftime("%d %B %Y")
     except:
         return date_str
+        
 def proses_ajukan_cuti(chat_id, karyawan, mulai, selesai):
     try:
         if not mulai or not selesai:
             return ("Mohon berikan tanggal mulai dan selesai cuti.\n\n"
-                    "Contoh: saya mau cuti dari 2026-12-01 sampai 2026-12-05")
+                    "Contoh: saya mau cuti dari 12-01-2026 sampai 15-01-2026")
 
         if isinstance(mulai, list): mulai = mulai[0]
         if isinstance(selesai, list): selesai = selesai[0]
 
-        # Handle format tanggal dari Dialogflow
-        if isinstance(mulai, dict): mulai = mulai.get("startDate", mulai.get("date", ""))
-        if isinstance(selesai, dict): selesai = selesai.get("startDate", selesai.get("date", ""))
+        # Ambil hanya bagian tanggal YYYY-MM-DD
+        mulai_str = str(mulai)[:10]
+        selesai_str = str(selesai)[:10]
 
-        tgl_mulai = datetime.fromisoformat(str(mulai).replace("Z", "").strip())
-        tgl_selesai = datetime.fromisoformat(str(selesai).replace("Z", "").strip())
+        tgl_mulai = datetime.strptime(mulai_str, "%Y-%m-%d")
+        tgl_selesai = datetime.strptime(selesai_str, "%Y-%m-%d")
 
         if tgl_selesai < tgl_mulai:
             return "Tanggal selesai harus setelah tanggal mulai."
