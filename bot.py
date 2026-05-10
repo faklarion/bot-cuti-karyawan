@@ -65,7 +65,10 @@ def detect_intent(chat_id, text):
     try:
         scopes = ["https://www.googleapis.com/auth/cloud-platform"]
         creds = Credentials.from_service_account_info(SERVICE_ACCOUNT_INFO, scopes=scopes)
-        creds.refresh(requests.Request())
+        
+        import google.auth.transport.requests
+        auth_req = google.auth.transport.requests.Request()
+        creds.refresh(auth_req)
         token = creds.token
 
         url = f"https://dialogflow.googleapis.com/v2/projects/{DIALOGFLOW_PROJECT_ID}/agent/sessions/{chat_id}:detectIntent"
@@ -88,7 +91,9 @@ def detect_intent(chat_id, text):
         return intent, params, fulfillment
 
     except Exception as e:
+        import traceback
         print(f"Error detect_intent: {e}")
+        print(traceback.format_exc())
         return "Default Fallback Intent", {}, ""
 
 # ============ TELEGRAM ============
