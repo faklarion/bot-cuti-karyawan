@@ -35,6 +35,8 @@ def get_sheet(sheet_name):
     client = gspread.authorize(creds)
     spreadsheet = client.open_by_key(SPREADSHEET_ID)
     return spreadsheet.worksheet(sheet_name)
+
+
 def extract_tanggal(text):
     pattern_dmy = r'\d{1,2}[-/]\d{1,2}[-/]\d{4}'
     pattern_iso = r'\d{4}-\d{2}-\d{2}'
@@ -269,7 +271,7 @@ def webhook():
                     f"Sisa cuti Anda: {karyawan['sisa_cuti']} hari\n\n"
                     f"Ketik pesan seperti:\n"
                     f"- sisa cuti saya\n"
-                    f"- saya mau cuti\n"
+                    f"- saya mau cuti dari 12-01-2026 sampai 15-01-2026\n"
                     f"- status cuti saya\n"
                     f"- profil saya"
                 )
@@ -278,13 +280,25 @@ def webhook():
             return "ok", 200
 
         intent, params, fulfillment = detect_intent(chat_id, text)
+        print(f"Intent: {intent} | Params: {params}")
+
+        # Untuk ajukan_cuti, ambil tanggal dari teks langsung
+        if intent == "ajukan_cuti":
+            mulai, selesai = extract_tanggal(text)
+            print(f"Tanggal extracted: mulai={mulai}, selesai={selesai}")
+            params["tanggal_mulai"] = mulai if mulai else ""
+            params["tanggal_selesai"] = selesai if selesai else ""
+
         response_text = process_intent(chat_id, intent, params, fulfillment)
+        print(f"Response: {response_text}")
         send_telegram(chat_id, response_text)
 
         return "ok", 200
 
     except Exception as e:
+        import traceback
         print(f"Error webhook: {e}")
+        print(traceback.format_exc())
         return "ok", 200
 
 if __name__ == "__main__":
