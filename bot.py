@@ -678,7 +678,7 @@ def simpan_cuti(chat_id, message_id):
 
 # ============ BATALKAN CUTI ============
 def proses_batalkan_cuti(chat_id):
-    """Tampilkan daftar cuti yang bisa dibatalkan"""
+    """Tampilkan daftar cuti yang bisa dibatalkan (Menunggu + Disetujui)"""
     try:
         sheet = get_sheet("PengajuanCuti")
         data = sheet.get_all_values()
@@ -687,28 +687,32 @@ def proses_batalkan_cuti(chat_id):
         for i, row in enumerate(data[1:], start=2):
             if len(row) >= 7 and str(row[1]) == str(chat_id):
                 status = row[6]
-                if status == "Menunggu Persetujuan":
+                if status in ["Menunggu Persetujuan", "Disetujui"]:
                     cuti_aktif.append({
                         "row_index": i,
                         "mulai": row[3],
                         "selesai": row[4],
-                        "hari": row[5]
+                        "hari": row[5],
+                        "status": status
                     })
 
         if not cuti_aktif:
-            send_telegram(chat_id, "📋 Tidak ada pengajuan cuti yang bisa dibatalkan.\n\n_Hanya cuti dengan status 'Menunggu Persetujuan' yang bisa dibatalkan._")
+            send_telegram(chat_id, "📋 Tidak ada pengajuan cuti yang bisa dibatalkan.")
             return
 
         text = "*🗑️ Pilih cuti yang ingin dibatalkan:*\n\n"
         buttons = []
 
         for idx, cuti in enumerate(cuti_aktif[:5]):
-            text += f"{idx+1}. 📅 {format_tanggal(cuti['mulai'])} \u2192 {format_tanggal(cuti['selesai'])} ({cuti['hari']} hari)\n"
+            status_label = "⏳" if cuti["status"] == "Menunggu Persetujuan" else "✅"
+            text += f"{idx+1}. {status_label} {format_tanggal(cuti['mulai'])} \u2192 {format_tanggal(cuti['selesai'])} ({cuti['hari']} hari)\n"
+            text += f"    _Status: {cuti['status']}_\n"
             buttons.append([{
                 "text": f"🗑️ Batalkan #{idx+1}",
                 "callback_data": f"batalkan_{cuti['row_index']}"
             }])
 
+        text += "\n📌 _Cuti yang sudah disetujui memerlukan persetujuan atasan untuk dibatalkan._"
         buttons.append([{"text": "↩️ Kembali", "callback_data": "batal_menu"}])
         keyboard = {"inline_keyboard": buttons}
         send_telegram(chat_id, text, reply_markup=keyboard)
@@ -719,7 +723,7 @@ def proses_batalkan_cuti(chat_id):
 
 
 def eksekusi_batalkan_cuti(chat_id, message_id, row_index):
-    """Batalkan cuti di spreadsheet"""
+    """Batalkan cuti di spreadsheet. Jika sudah disetujui, minta approval atasan."""
     try:
         sheet = get_sheet("PengajuanCuti")
         row_data = sheet.row_values(row_index)
@@ -728,23 +732,131 @@ def eksekusi_batalkan_cuti(chat_id, message_id, row_index):
             edit_telegram_message(chat_id, message_id, "❌ Data cuti tidak ditemukan atau bukan milik Anda.")
             return
 
-        if len(row_data) > 6 and row_data[6] != "Menunggu Persetujuan":
+        status = row_data[6] if len(row_data) > 6 else ""
+
+        if status not in ["Menunggu Persetujuan", "Disetujui"]:
             edit_telegram_message(chat_id, message_id, "❌ Cuti ini sudah tidak bisa dibatalkan karena statusnya sudah berubah.")
             return
 
-        sheet.update_cell(row_index, 7, "Dibatalkan")
+        # Jika masih menunggu, langsung batalkan
+        if status == "Menunggu Persetujuan":
+            sheet.update_cell(row_index, 7, "Dibatalkan")
 
-        text = (f"✅ *Cuti berhasil dibatalkan!*\n\n"
-                f"📅 {format_tanggal(row_data[3])} \u2192 {format_tanggal(row_data[4])}\n"
-                f"📊 {row_data[5]} hari kerja\n"
-                f"🗑️ Status: Dibatalkan")
+            text = (f"✅ *Cuti berhasil dibatalkan!*\n\n"
+                    f"📅 {format_tanggal(row_data[3])} \u2192 {format_tanggal(row_data[4])}\n"
+                    f"📊 {row_data[5]} hari kerja\n"
+                    f"🗑️ Status: Dibatalkan")
 
-        edit_telegram_message(chat_id, message_id, text)
-        logger.info(f"Cuti dibatalkan: chat_id={chat_id} | {row_data[3]} - {row_data[4]}")
+            edit_telegram_message(chat_id, message_id, text)
+            logger.info(f"Cuti dibatalkan (langsung): chat_id={chat_id} | {row_data[3]} - {row_data[4]}")
+
+        # Jika sudah disetujui, kirim request pembatalan ke atasan
+        elif status == "Disetujui":
+            sheet.update_cell(row_index, 7, "Menunggu Pembatalan")
+
+            text = (f"⏳ *Permintaan pembatalan dikirim ke atasan*\n\n"
+                    f"📅 {format_tanggal(row_data[3])} \u2192 {format_tanggal(row_data[4])}\n"
+                    f"📊 {row_data[5]} hari kerja\n"
+                    f"🔄 Status: Menunggu Pembatalan\n\n"
+                    f"_Atasan Anda akan menerima notifikasi untuk menyetujui pembatalan._")
+
+            edit_telegram_message(chat_id, message_id, text)
+
+            # Kirim notifikasi ke atasan
+            karyawan = get_karyawan(chat_id)
+            if karyawan:
+                kirim_notifikasi_pembatalan_atasan(karyawan, row_data, row_index)
+
+            logger.info(f"Request pembatalan dikirim: chat_id={chat_id} | {row_data[3]} - {row_data[4]}")
 
     except Exception as e:
         logger.exception(f"Error eksekusi_batalkan_cuti: {e}")
         edit_telegram_message(chat_id, message_id, f"❌ Gagal membatalkan: {str(e)}")
+
+
+def kirim_notifikasi_pembatalan_atasan(karyawan, row_data, row_index):
+    """Kirim notifikasi pembatalan cuti ke atasan"""
+    chat_id_atasan = karyawan.get("chat_id_atasan")
+    if not chat_id_atasan:
+        logger.warning(f"Karyawan {karyawan['nama']} tidak punya TelegramID atasan")
+        return
+
+    text = (f"🔄 *Permintaan Pembatalan Cuti*\n\n"
+            f"👤 Nama: {karyawan['nama']}\n"
+            f"💼 Jabatan: {karyawan['jabatan']}\n"
+            f"📅 {format_tanggal(row_data[3])} \u2192 {format_tanggal(row_data[4])}\n"
+            f"📊 {row_data[5]} hari kerja\n\n"
+            f"Karyawan ini ingin *membatalkan* cuti yang sudah disetujui.\n"
+            f"Silakan pilih tindakan:")
+
+    keyboard = {
+        "inline_keyboard": [
+            [
+                {"text": "✅ Setujui Pembatalan", "callback_data": f"approve_cancel_{row_index}"},
+                {"text": "❌ Tolak Pembatalan", "callback_data": f"reject_cancel_{row_index}"}
+            ]
+        ]
+    }
+
+    send_telegram(chat_id_atasan, text, reply_markup=keyboard)
+    logger.info(f"Notifikasi pembatalan dikirim ke atasan (chat_id: {chat_id_atasan})")
+
+
+def proses_approval_pembatalan(chat_id_atasan, message_id, row_index, action):
+    """Proses approve/reject pembatalan dari atasan"""
+    try:
+        sheet = get_sheet("PengajuanCuti")
+        row_data = sheet.row_values(row_index)
+
+        if not row_data:
+            edit_telegram_message(chat_id_atasan, message_id, "❌ Data pengajuan tidak ditemukan.")
+            return
+
+        if len(row_data) > 6 and row_data[6] != "Menunggu Pembatalan":
+            edit_telegram_message(chat_id_atasan, message_id,
+                f"⚠️ Status sudah berubah: *{row_data[6]}*")
+            return
+
+        chat_id_karyawan = row_data[1]
+        nama_karyawan = row_data[2]
+
+        if action == "approve":
+            # Pembatalan disetujui
+            sheet.update_cell(row_index, 7, "Dibatalkan")
+
+            text_atasan = (f"✅ *Pembatalan Disetujui*\n\n"
+                           f"👤 {nama_karyawan}\n"
+                           f"📅 {format_tanggal(row_data[3])} \u2192 {format_tanggal(row_data[4])}\n"
+                           f"🗑️ Cuti dibatalkan")
+
+            text_karyawan = (f"✅ *Pembatalan Cuti Disetujui!*\n\n"
+                             f"📅 {format_tanggal(row_data[3])} \u2192 {format_tanggal(row_data[4])}\n"
+                             f"📊 {row_data[5]} hari kerja\n"
+                             f"🗑️ Status: Dibatalkan\n\n"
+                             f"Cuti Anda berhasil dibatalkan oleh atasan.")
+
+        else:
+            # Pembatalan ditolak, kembalikan ke Disetujui
+            sheet.update_cell(row_index, 7, "Disetujui")
+
+            text_atasan = (f"❌ *Pembatalan Ditolak*\n\n"
+                           f"👤 {nama_karyawan}\n"
+                           f"📅 {format_tanggal(row_data[3])} \u2192 {format_tanggal(row_data[4])}\n"
+                           f"✅ Cuti tetap berlaku")
+
+            text_karyawan = (f"❌ *Pembatalan Cuti Ditolak*\n\n"
+                             f"📅 {format_tanggal(row_data[3])} \u2192 {format_tanggal(row_data[4])}\n"
+                             f"📊 {row_data[5]} hari kerja\n"
+                             f"✅ Status: Disetujui (tetap berlaku)\n\n"
+                             f"Atasan tidak menyetujui pembatalan. Cuti Anda tetap berjalan.")
+
+        edit_telegram_message(chat_id_atasan, message_id, text_atasan)
+        send_telegram(chat_id_karyawan, text_karyawan)
+        logger.info(f"Pembatalan {action}: {nama_karyawan} | row {row_index}")
+
+    except Exception as e:
+        logger.exception(f"Error proses_approval_pembatalan: {e}")
+        edit_telegram_message(chat_id_atasan, message_id, f"❌ Gagal memproses: {str(e)}")
 
 
 # ============ REKAP CUTI BULANAN ============
@@ -851,6 +963,8 @@ def proses_status_cuti(chat_id):
                     emoji = "❌"
                 elif status == "Dibatalkan":
                     emoji = "🗑️"
+                elif status == "Menunggu Pembatalan":
+                    emoji = "🔄"
                 else:
                     emoji = "⏳"
 
@@ -1002,6 +1116,16 @@ def handle_callback(data):
         edit_telegram_message(chat_id, message_id, "❌ Pengajuan cuti dibatalkan.\n\nAnda bisa mengajukan cuti kapan saja.")
 
     # Approve/Reject dari atasan
+    elif callback_data.startswith("approve_cancel_"):
+        row_index = int(callback_data.replace("approve_cancel_", ""))
+        answer_callback(callback_id, "Menyetujui pembatalan...")
+        proses_approval_pembatalan(chat_id, message_id, row_index, "approve")
+
+    elif callback_data.startswith("reject_cancel_"):
+        row_index = int(callback_data.replace("reject_cancel_", ""))
+        answer_callback(callback_id, "Menolak pembatalan...")
+        proses_approval_pembatalan(chat_id, message_id, row_index, "reject")
+
     elif callback_data.startswith("approve_"):
         row_index = int(callback_data.replace("approve_", ""))
         answer_callback(callback_id, "Menyetujui cuti...")
@@ -1107,7 +1231,7 @@ def webhook():
         # Handle perintah langsung (tanpa Dialogflow)
         text_lower = text.lower()
 
-        if text_lower in ["batalkan cuti", "cancel cuti", "batal cuti", "/batalkan"]:
+        if any(kata in text_lower for kata in ["batalkan cuti", "cancel cuti", "batal cuti", "batalkan"]):
             proses_batalkan_cuti(chat_id)
             return "ok", 200
 
