@@ -65,12 +65,10 @@ ALASAN_CUTI = {
 
 # Hari libur nasional Indonesia (update setiap tahun)
 HARI_LIBUR = [
-    # 2026
     "2026-01-01", "2026-01-29", "2026-02-17", "2026-03-20",
     "2026-03-29", "2026-03-30", "2026-04-03", "2026-05-01",
     "2026-05-14", "2026-05-26", "2026-06-01", "2026-06-05",
     "2026-06-26", "2026-08-17", "2026-09-05", "2026-12-25",
-    # 2025
     "2025-01-01", "2025-01-27", "2025-01-29", "2025-03-29",
     "2025-03-31", "2025-04-01", "2025-04-18", "2025-05-01",
     "2025-05-12", "2025-05-29", "2025-06-01", "2025-06-07",
@@ -78,7 +76,6 @@ HARI_LIBUR = [
 ]
 
 # Temporary storage untuk pending cuti (sebelum konfirmasi)
-# Format: {chat_id: {mulai, selesai, hari_kerja, hari_kalender, alasan, timestamp}}
 pending_cuti = {}
 
 
@@ -100,7 +97,7 @@ def format_tanggal_singkat(tgl):
 
 # ============ HITUNG HARI KERJA ============
 def hitung_hari_kerja(tgl_mulai, tgl_selesai):
-    """Hitung jumlah hari kerja (exclude weekend Sabtu-Minggu dan hari libur nasional)"""
+    """Hitung jumlah hari kerja (exclude weekend dan hari libur nasional)"""
     hari_kerja = 0
     current = tgl_mulai
     detail_libur = []
@@ -135,6 +132,7 @@ def get_sheet(sheet_name):
 
 
 def get_karyawan(chat_id):
+    """Ambil data karyawan berdasarkan chat_id"""
     try:
         sheet = get_sheet("Karyawan")
         data = sheet.get_all_values()
@@ -147,7 +145,9 @@ def get_karyawan(chat_id):
                     "jabatan": row[3],
                     "divisi": row[4],
                     "sisa_cuti": int(row[8]) if row[8] and row[8].isdigit() else 12,
-                    "atasan": row[9] if len(row) > 9 else "-"
+                    "atasan": row[9] if len(row) > 9 else "-",
+                    "chat_id_atasan": str(row[10]).strip() if len(row) > 10 and row[10] else None,
+                    "chat_id": chat_id_str
                 }
         return None
     except Exception as e:
@@ -296,7 +296,7 @@ def send_telegram(chat_id, text, reply_markup=None):
 
 
 def edit_telegram_message(chat_id, message_id, text, reply_markup=None):
-    """Edit pesan yang sudah terkirim (untuk update inline keyboard)"""
+    """Edit pesan yang sudah terkirim"""
     url = f"https://api.telegram.org/bot{TOKEN}/editMessageText"
     payload = {
         "chat_id": chat_id,
@@ -324,6 +324,92 @@ def answer_callback(callback_query_id, text=""):
         logger.error(f"Error answer_callback: {e}")
 
 
+# ============ NOTIFIKASI ATASAN ============
+def kirim_notifikasi_atasan(karyawan, pending_data, row_index):
+    """Kirim notifikasi ke atasan dengan tombol approve/reject"""
+    chat_id_atasan = karyawan.get("chat_id_atasan")
+    if not chat_id_atasan:
+        logger.warning(f"Karyawan {karyawan['nama']} tidak punya TelegramID atasan (kolom K)")
+        return
+
+    text = (f"📬 *Pengajuan Cuti Baru*\n\n"
+            f"👤 Nama: {karyawan['nama']}\n"
+            f"💼 Jabatan: {karyawan['jabatan']}\n"
+            f"🏢 Divisi: {karyawan['divisi']}\n"
+            f"📅 Mulai: {format_tanggal(pending_data['mulai'])}\n"
+            f"📅 Selesai: {format_tanggal(pending_data['selesai'])}\n"
+            f"📊 Jumlah: *{pending_data['hari_kerja']} hari kerja*\n"
+            f"📝 Alasan: {pending_data['alasan']}\n"
+            f"📊 Sisa cuti: {karyawan['sisa_cuti']} hari\n\n"
+            f"Silakan pilih tindakan:")
+
+    keyboard = {
+        "inline_keyboard": [
+            [
+                {"text": "✅ Setujui", "callback_data": f"approve_{row_index}"},
+                {"text": "❌ Tolak", "callback_data": f"reject_{row_index}"}
+            ]
+        ]
+    }
+
+    send_telegram(chat_id_atasan, text, reply_markup=keyboard)
+    logger.info(f"Notifikasi dikirim ke atasan {karyawan.get('atasan', '?')} (chat_id: {chat_id_atasan})")
+
+
+def proses_approval(chat_id_atasan, message_id, row_index, action):
+    """Proses approve/reject dari atasan"""
+    try:
+        sheet = get_sheet("PengajuanCuti")
+        row_data = sheet.row_values(row_index)
+
+        if not row_data:
+            edit_telegram_message(chat_id_atasan, message_id, "❌ Data pengajuan tidak ditemukan.")
+            return
+
+        if len(row_data) > 6 and row_data[6] != "Menunggu Persetujuan":
+            edit_telegram_message(chat_id_atasan, message_id,
+                f"⚠️ Pengajuan ini sudah diproses sebelumnya.\nStatus: *{row_data[6]}*")
+            return
+
+        # Update status
+        status_baru = "Disetujui" if action == "approve" else "Ditolak"
+        sheet.update_cell(row_index, 7, status_baru)
+
+        nama_karyawan = row_data[2]
+        chat_id_karyawan = row_data[1]
+
+        # Update pesan di chat atasan
+        emoji = "✅" if action == "approve" else "❌"
+        text_atasan = (f"{emoji} *Cuti {status_baru}*\n\n"
+                       f"👤 {nama_karyawan}\n"
+                       f"📅 {format_tanggal(row_data[3])} \u2192 {format_tanggal(row_data[4])}\n"
+                       f"📊 {row_data[5]} hari kerja\n"
+                       f"🕐 Diproses: {datetime.now().strftime('%d %B %Y %H:%M')}")
+
+        edit_telegram_message(chat_id_atasan, message_id, text_atasan)
+
+        # Kirim notifikasi ke karyawan
+        if action == "approve":
+            text_karyawan = (f"🎉 *Cuti Anda Disetujui!*\n\n"
+                             f"📅 {format_tanggal(row_data[3])} \u2192 {format_tanggal(row_data[4])}\n"
+                             f"📊 {row_data[5]} hari kerja\n"
+                             f"✅ Disetujui oleh atasan\n\n"
+                             f"Selamat beristirahat! 🌴")
+        else:
+            text_karyawan = (f"😔 *Cuti Anda Ditolak*\n\n"
+                             f"📅 {format_tanggal(row_data[3])} \u2192 {format_tanggal(row_data[4])}\n"
+                             f"📊 {row_data[5]} hari kerja\n"
+                             f"❌ Ditolak oleh atasan\n\n"
+                             f"Silakan hubungi atasan untuk informasi lebih lanjut atau ajukan di tanggal lain.")
+
+        send_telegram(chat_id_karyawan, text_karyawan)
+        logger.info(f"Cuti {status_baru}: {nama_karyawan} | row {row_index} | oleh atasan chat_id={chat_id_atasan}")
+
+    except Exception as e:
+        logger.exception(f"Error proses_approval: {e}")
+        edit_telegram_message(chat_id_atasan, message_id, f"❌ Gagal memproses: {str(e)}")
+
+
 # ============ PROSES CUTI DENGAN KONFIRMASI ============
 def validasi_cuti(chat_id, karyawan, mulai, selesai):
     """Validasi pengajuan cuti dan return data atau error message"""
@@ -331,8 +417,6 @@ def validasi_cuti(chat_id, karyawan, mulai, selesai):
         if not mulai or not selesai:
             return None, ("❌ Mohon berikan tanggal mulai dan selesai cuti.\n\n"
                           "Contoh: *saya mau cuti dari 1 Desember 2026 sampai 5 Desember 2026*")
-
-        logger.debug(f"Raw mulai={mulai} ({type(mulai)}), selesai={selesai} ({type(selesai)})")
 
         # Pastikan format tanggal benar
         if isinstance(mulai, dict):
@@ -418,7 +502,6 @@ def validasi_cuti(chat_id, karyawan, mulai, selesai):
                     existing_selesai = datetime.strptime(row[4], "%Y-%m-%d")
                     status = row[6] if len(row) > 6 else ""
 
-                    # Skip yang sudah dibatalkan
                     if status == "Dibatalkan":
                         continue
 
@@ -430,7 +513,6 @@ def validasi_cuti(chat_id, karyawan, mulai, selesai):
                 except Exception:
                     pass
 
-        # Validasi lolos, return data
         return {
             "tgl_mulai": tgl_mulai,
             "tgl_selesai": tgl_selesai,
@@ -444,7 +526,7 @@ def validasi_cuti(chat_id, karyawan, mulai, selesai):
         return None, f"❌ Terjadi kesalahan: {str(e)}"
 
 
-def proses_ajukan_cuti(chat_id, karyawan, mulai, selesai):
+def proses_ajukan_cuti(chat_id, karyawan, mulai, selesai, is_setengah_hari=False):
     """Validasi dan tampilkan konfirmasi dengan inline keyboard"""
     data, error = validasi_cuti(chat_id, karyawan, mulai, selesai)
 
@@ -456,27 +538,28 @@ def proses_ajukan_cuti(chat_id, karyawan, mulai, selesai):
     pending_cuti[chat_id] = {
         "mulai": data["tgl_mulai"].strftime("%Y-%m-%d"),
         "selesai": data["tgl_selesai"].strftime("%Y-%m-%d"),
-        "hari_kerja": data["hari_kerja"],
+        "hari_kerja": 0.5 if is_setengah_hari else data["hari_kerja"],
         "hari_kalender": data["hari_kalender"],
         "alasan": None,
+        "setengah_hari": is_setengah_hari,
         "timestamp": datetime.now().isoformat()
     }
 
     # Info libur
     info_libur = ""
-    if data["detail_libur"]:
+    if data["detail_libur"] and not is_setengah_hari:
         info_libur = f"\n📌 _Tidak dihitung: {len(data['detail_libur'])} hari (weekend/libur)_"
 
-    # Kirim konfirmasi dengan pilihan alasan
+    jumlah_display = "0.5 hari (setengah hari)" if is_setengah_hari else f"*{data['hari_kerja']} hari kerja* (dari {data['hari_kalender']} hari kalender)"
+
     text = (f"📋 *Konfirmasi Pengajuan Cuti*\n\n"
             f"👤 Nama: {karyawan['nama']}\n"
             f"📅 Mulai: {format_tanggal(data['tgl_mulai'])}\n"
             f"📅 Selesai: {format_tanggal(data['tgl_selesai'])}\n"
-            f"📊 Jumlah: *{data['hari_kerja']} hari kerja* (dari {data['hari_kalender']} hari kalender)"
+            f"📊 Jumlah: {jumlah_display}"
             f"{info_libur}\n\n"
             f"📝 *Pilih alasan cuti:*")
 
-    # Inline keyboard untuk alasan cuti
     keyboard = {
         "inline_keyboard": [
             [
@@ -484,7 +567,7 @@ def proses_ajukan_cuti(chat_id, karyawan, mulai, selesai):
                 {"text": "🤒 Sakit", "callback_data": "alasan_sakit"}
             ],
             [
-                {"text": "👨‍👩‍👧 Keluarga", "callback_data": "alasan_keluarga"},
+                {"text": "👨\u200d👩\u200d👧 Keluarga", "callback_data": "alasan_keluarga"},
                 {"text": "💒 Menikah", "callback_data": "alasan_menikah"}
             ],
             [
@@ -512,10 +595,12 @@ def konfirmasi_final(chat_id, message_id, alasan_key):
     pending = pending_cuti[chat_id]
     pending["alasan"] = ALASAN_CUTI.get(alasan_key, "Lainnya")
 
+    jumlah_display = "0.5 hari (setengah hari)" if pending.get("setengah_hari") else f"*{pending['hari_kerja']} hari kerja*"
+
     text = (f"📋 *Konfirmasi Final*\n\n"
             f"📅 Mulai: {format_tanggal(pending['mulai'])}\n"
             f"📅 Selesai: {format_tanggal(pending['selesai'])}\n"
-            f"📊 Jumlah: *{pending['hari_kerja']} hari kerja*\n"
+            f"📊 Jumlah: {jumlah_display}\n"
             f"📝 Alasan: {pending['alasan']}\n\n"
             f"Apakah Anda yakin ingin mengajukan cuti ini?")
 
@@ -532,7 +617,7 @@ def konfirmasi_final(chat_id, message_id, alasan_key):
 
 
 def simpan_cuti(chat_id, message_id):
-    """Simpan cuti ke spreadsheet setelah dikonfirmasi"""
+    """Simpan cuti ke spreadsheet setelah dikonfirmasi, lalu notifikasi atasan"""
     if chat_id not in pending_cuti:
         edit_telegram_message(chat_id, message_id, "❌ Sesi pengajuan sudah kadaluarsa. Silakan ajukan ulang.")
         return
@@ -557,23 +642,34 @@ def simpan_cuti(chat_id, message_id):
             pending["alasan"]
         ])
 
+        # Cari row index yang baru ditambahkan
+        all_data = sheet_pengajuan.get_all_values()
+        row_index = len(all_data)  # Row terakhir
+
         info_libur = ""
         hari_kalender = pending.get("hari_kalender", pending["hari_kerja"])
-        if hari_kalender > pending["hari_kerja"]:
-            skip = hari_kalender - pending["hari_kerja"]
-            info_libur = f"\n📌 _Tidak dihitung: {skip} hari (weekend/libur)_"
+        if isinstance(hari_kalender, (int, float)) and isinstance(pending["hari_kerja"], (int, float)):
+            if hari_kalender > pending["hari_kerja"]:
+                skip = int(hari_kalender - pending["hari_kerja"])
+                info_libur = f"\n📌 _Tidak dihitung: {skip} hari (weekend/libur)_"
+
+        jumlah_display = "0.5 hari (setengah hari)" if pending.get("setengah_hari") else f"*{pending['hari_kerja']} hari kerja*"
 
         text = (f"✅ *Pengajuan cuti berhasil disimpan!*\n\n"
                 f"👤 Nama: {karyawan['nama']}\n"
                 f"📅 Mulai: {format_tanggal(pending['mulai'])}\n"
                 f"📅 Selesai: {format_tanggal(pending['selesai'])}\n"
-                f"📊 Jumlah: *{pending['hari_kerja']} hari kerja*"
+                f"📊 Jumlah: {jumlah_display}"
                 f"{info_libur}\n"
                 f"📝 Alasan: {pending['alasan']}\n"
-                f"⏳ Status: Menunggu Persetujuan")
+                f"⏳ Status: Menunggu Persetujuan\n\n"
+                f"📬 _Notifikasi telah dikirim ke atasan Anda._")
 
         edit_telegram_message(chat_id, message_id, text)
         logger.info(f"Cuti disimpan: {karyawan['nama']} | {pending['mulai']} - {pending['selesai']} | {pending['alasan']}")
+
+        # Kirim notifikasi ke atasan
+        kirim_notifikasi_atasan(karyawan, pending, row_index)
 
     except Exception as e:
         logger.exception(f"Error simpan cuti: {e}")
@@ -588,7 +684,7 @@ def proses_batalkan_cuti(chat_id):
         data = sheet.get_all_values()
         cuti_aktif = []
 
-        for i, row in enumerate(data[1:], start=2):  # start=2 karena row 1 adalah header
+        for i, row in enumerate(data[1:], start=2):
             if len(row) >= 7 and str(row[1]) == str(chat_id):
                 status = row[6]
                 if status == "Menunggu Persetujuan":
@@ -606,7 +702,7 @@ def proses_batalkan_cuti(chat_id):
         text = "*🗑️ Pilih cuti yang ingin dibatalkan:*\n\n"
         buttons = []
 
-        for idx, cuti in enumerate(cuti_aktif[:5]):  # Maksimal 5
+        for idx, cuti in enumerate(cuti_aktif[:5]):
             text += f"{idx+1}. 📅 {format_tanggal(cuti['mulai'])} \u2192 {format_tanggal(cuti['selesai'])} ({cuti['hari']} hari)\n"
             buttons.append([{
                 "text": f"🗑️ Batalkan #{idx+1}",
@@ -614,7 +710,6 @@ def proses_batalkan_cuti(chat_id):
             }])
 
         buttons.append([{"text": "↩️ Kembali", "callback_data": "batal_menu"}])
-
         keyboard = {"inline_keyboard": buttons}
         send_telegram(chat_id, text, reply_markup=keyboard)
 
@@ -637,7 +732,6 @@ def eksekusi_batalkan_cuti(chat_id, message_id, row_index):
             edit_telegram_message(chat_id, message_id, "❌ Cuti ini sudah tidak bisa dibatalkan karena statusnya sudah berubah.")
             return
 
-        # Update status menjadi "Dibatalkan"
         sheet.update_cell(row_index, 7, "Dibatalkan")
 
         text = (f"✅ *Cuti berhasil dibatalkan!*\n\n"
@@ -651,6 +745,86 @@ def eksekusi_batalkan_cuti(chat_id, message_id, row_index):
     except Exception as e:
         logger.exception(f"Error eksekusi_batalkan_cuti: {e}")
         edit_telegram_message(chat_id, message_id, f"❌ Gagal membatalkan: {str(e)}")
+
+
+# ============ REKAP CUTI BULANAN ============
+def proses_rekap_bulanan(chat_id, bulan=None, tahun=None):
+    """Rekap siapa saja yang cuti di bulan tertentu"""
+    try:
+        if not bulan:
+            bulan = datetime.now().month
+        if not tahun:
+            tahun = datetime.now().year
+
+        sheet = get_sheet("PengajuanCuti")
+        data = sheet.get_all_values()
+
+        rekap = []
+        for row in data[1:]:
+            if len(row) >= 7:
+                status = row[6]
+                if status in ["Disetujui", "Menunggu Persetujuan"]:
+                    try:
+                        tgl_mulai = datetime.strptime(row[3], "%Y-%m-%d")
+                        tgl_selesai = datetime.strptime(row[4], "%Y-%m-%d")
+
+                        # Cek apakah cuti overlap dengan bulan yang diminta
+                        awal_bulan = datetime(tahun, bulan, 1)
+                        if bulan == 12:
+                            akhir_bulan = datetime(tahun + 1, 1, 1) - timedelta(days=1)
+                        else:
+                            akhir_bulan = datetime(tahun, bulan + 1, 1) - timedelta(days=1)
+
+                        if tgl_mulai <= akhir_bulan and tgl_selesai >= awal_bulan:
+                            emoji_status = "✅" if status == "Disetujui" else "⏳"
+                            rekap.append({
+                                "nama": row[2],
+                                "mulai": row[3],
+                                "selesai": row[4],
+                                "hari": row[5],
+                                "status": status,
+                                "emoji": emoji_status,
+                                "alasan": row[7] if len(row) > 7 else "-"
+                            })
+                    except Exception:
+                        pass
+
+        if not rekap:
+            send_telegram(chat_id, f"📋 Tidak ada data cuti di bulan *{NAMA_BULAN[bulan]} {tahun}*.")
+            return
+
+        text = f"📊 *Rekap Cuti - {NAMA_BULAN[bulan]} {tahun}*\n\n"
+        text += f"Total: {len(rekap)} pengajuan\n\n"
+
+        for item in rekap[:15]:  # Maksimal 15 entry
+            text += f"{item['emoji']} *{item['nama']}*\n"
+            text += f"   📅 {format_tanggal(item['mulai'])} \u2192 {format_tanggal(item['selesai'])}\n"
+            text += f"   📊 {item['hari']} hari | {item['status']}"
+            if item['alasan'] and item['alasan'] != "-":
+                text += f" | {item['alasan']}"
+            text += "\n\n"
+
+        send_telegram(chat_id, text)
+
+    except Exception as e:
+        logger.error(f"Error rekap bulanan: {e}")
+        send_telegram(chat_id, "❌ Terjadi kesalahan saat mengambil rekap cuti.")
+
+
+# ============ CUTI SETENGAH HARI ============
+def proses_cuti_setengah_hari(chat_id, karyawan, tanggal_str):
+    """Proses pengajuan cuti setengah hari"""
+    if not tanggal_str:
+        send_telegram(chat_id, "❌ Mohon berikan tanggal untuk cuti setengah hari.\n\nContoh: *cuti setengah hari 15 Desember 2026*")
+        return
+
+    tanggal = parse_tanggal_indonesia(tanggal_str)
+    if not tanggal:
+        send_telegram(chat_id, "❌ Format tanggal tidak dikenali.\n\nContoh: *cuti setengah hari 15 Desember 2026*")
+        return
+
+    # Gunakan proses_ajukan_cuti dengan flag setengah hari
+    proses_ajukan_cuti(chat_id, karyawan, tanggal, tanggal, is_setengah_hari=True)
 
 
 # ============ STATUS CUTI ============
@@ -694,6 +868,45 @@ def proses_status_cuti(chat_id):
         return "❌ Terjadi kesalahan saat mengecek status cuti."
 
 
+# ============ PENGINGAT H-1 ============
+def kirim_pengingat_cuti():
+    """Kirim pengingat H-1 ke karyawan yang besok mulai cuti.
+    Dipanggil via endpoint /reminder (trigger dari scheduler eksternal).
+    """
+    try:
+        sheet = get_sheet("PengajuanCuti")
+        data = sheet.get_all_values()
+        besok = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+        count = 0
+
+        for row in data[1:]:
+            if len(row) >= 7:
+                status = row[6]
+                tgl_mulai = row[3]
+
+                if status == "Disetujui" and tgl_mulai == besok:
+                    chat_id = row[1]
+                    nama = row[2]
+                    tgl_selesai = row[4]
+                    hari = row[5]
+
+                    text = (f"🔔 *Pengingat Cuti*\n\n"
+                            f"Halo {nama}! Cuti Anda dimulai *besok*.\n\n"
+                            f"📅 {format_tanggal(tgl_mulai)} \u2192 {format_tanggal(tgl_selesai)}\n"
+                            f"📊 {hari} hari kerja\n\n"
+                            f"Pastikan pekerjaan sudah di-handover ya. Selamat beristirahat! 🌴")
+
+                    send_telegram(chat_id, text)
+                    count += 1
+
+        logger.info(f"Pengingat H-1 dikirim ke {count} karyawan")
+        return count
+
+    except Exception as e:
+        logger.exception("Error kirim_pengingat_cuti")
+        return 0
+
+
 # ============ PROCESS INTENT ============
 def process_intent(chat_id, intent, params, fulfillment, original_text=""):
     karyawan = get_karyawan(chat_id)
@@ -713,15 +926,34 @@ def process_intent(chat_id, intent, params, fulfillment, original_text=""):
 
         if not mulai or not selesai:
             mulai, selesai = extract_two_dates(original_text)
-            logger.debug(f"Extracted from text: mulai={mulai}, selesai={selesai}")
 
         proses_ajukan_cuti(chat_id, karyawan, mulai, selesai)
+
+    elif intent == "cuti_setengah_hari":
+        tanggal = params.get("tanggal") or params.get("date") or ""
+        if not tanggal:
+            # Coba ekstrak dari teks
+            tanggal = original_text
+        proses_cuti_setengah_hari(chat_id, karyawan, str(tanggal))
 
     elif intent in ["cek_status_cuti", "riwayat_cuti"]:
         send_telegram(chat_id, proses_status_cuti(chat_id))
 
     elif intent == "batalkan_cuti":
         proses_batalkan_cuti(chat_id)
+
+    elif intent == "rekap_cuti":
+        # Coba ambil bulan dari params atau teks
+        bulan = None
+        tahun = None
+        for key, val in BULAN_MAP.items():
+            if key in original_text.lower():
+                bulan = val
+                break
+        tahun_match = re.search(r'(202\d|203\d)', original_text)
+        if tahun_match:
+            tahun = int(tahun_match.group(1))
+        proses_rekap_bulanan(chat_id, bulan, tahun)
 
     elif intent == "info_profil":
         send_telegram(chat_id,
@@ -769,6 +1001,17 @@ def handle_callback(data):
         pending_cuti.pop(chat_id, None)
         edit_telegram_message(chat_id, message_id, "❌ Pengajuan cuti dibatalkan.\n\nAnda bisa mengajukan cuti kapan saja.")
 
+    # Approve/Reject dari atasan
+    elif callback_data.startswith("approve_"):
+        row_index = int(callback_data.replace("approve_", ""))
+        answer_callback(callback_id, "Menyetujui cuti...")
+        proses_approval(chat_id, message_id, row_index, "approve")
+
+    elif callback_data.startswith("reject_"):
+        row_index = int(callback_data.replace("reject_", ""))
+        answer_callback(callback_id, "Menolak cuti...")
+        proses_approval(chat_id, message_id, row_index, "reject")
+
     # Batalkan cuti yang sudah diajukan
     elif callback_data.startswith("batalkan_"):
         row_index = int(callback_data.replace("batalkan_", ""))
@@ -790,6 +1033,13 @@ def index():
     return "Bot Cuti Karyawan dengan Dialogflow - Aktif"
 
 
+@app.route("/reminder", methods=["GET", "POST"])
+def reminder():
+    """Endpoint untuk trigger pengingat H-1 (panggil dari scheduler/cron)"""
+    count = kirim_pengingat_cuti()
+    return json.dumps({"status": "ok", "reminders_sent": count}), 200
+
+
 @app.route("/webhook", methods=["POST"])
 def webhook():
     try:
@@ -809,6 +1059,7 @@ def webhook():
 
         logger.info(f"Message from {chat_id}: {text[:50]}")
 
+        # /start command
         if text == "/start":
             karyawan = get_karyawan(chat_id)
             if karyawan:
@@ -818,42 +1069,83 @@ def webhook():
                     f"Sisa cuti Anda: *{karyawan['sisa_cuti']} hari*\n\n"
                     f"*Yang bisa saya bantu:*\n"
                     f"• Cek sisa cuti: *sisa cuti saya*\n"
-                    f"• Ajukan cuti: *saya mau cuti dari 1 Desember 2026 sampai 5 Desember 2026*\n"
+                    f"• Ajukan cuti: *cuti dari 1 Des 2026 sampai 5 Des 2026*\n"
+                    f"• Cuti setengah hari: *cuti setengah hari 15 Des 2026*\n"
                     f"• Cek status: *status cuti saya*\n"
                     f"• Batalkan cuti: *batalkan cuti*\n"
+                    f"• Rekap bulanan: *rekap cuti Desember 2026*\n"
                     f"• Lihat profil: *profil saya*"
                 )
             else:
                 send_telegram(chat_id, f"❌ Data karyawan tidak ditemukan.\n\nTelegram ID Anda: `{chat_id}`\n\nSilakan hubungi admin untuk mendaftarkan ID ini.")
             return "ok", 200
 
+        # Help command
         if text.lower() in ["bantuan", "help", "/help"]:
             send_telegram(chat_id,
                 "🤖 *Bantuan Bot Cuti*\n\n"
                 "*Perintah yang bisa digunakan:*\n\n"
                 "1️⃣ *Cek Sisa Cuti*\n"
-                "• `sisa cuti saya`\n"
-                "• `cek cuti`\n\n"
+                "• `sisa cuti saya`\n\n"
                 "2️⃣ *Ajukan Cuti*\n"
-                "• `saya mau cuti dari 1 Desember 2026 sampai 5 Desember 2026`\n"
-                "• `cuti 10-12-2026 sampai 15-12-2026`\n\n"
-                "3️⃣ *Cek Status*\n"
+                "• `cuti dari 1 Desember 2026 sampai 5 Desember 2026`\n\n"
+                "3️⃣ *Cuti Setengah Hari*\n"
+                "• `cuti setengah hari 15 Desember 2026`\n\n"
+                "4️⃣ *Cek Status*\n"
                 "• `status cuti saya`\n"
                 "• `riwayat cuti`\n\n"
-                "4️⃣ *Batalkan Cuti*\n"
-                "• `batalkan cuti`\n"
-                "• `cancel cuti`\n\n"
-                "5️⃣ *Lihat Profil*\n"
-                "• `profil saya`\n"
-                "• `info saya`"
+                "5️⃣ *Batalkan Cuti*\n"
+                "• `batalkan cuti`\n\n"
+                "6️⃣ *Rekap Cuti Bulanan*\n"
+                "• `rekap cuti Desember 2026`\n"
+                "• `rekap cuti bulan ini`\n\n"
+                "7️⃣ *Lihat Profil*\n"
+                "• `profil saya`"
             )
             return "ok", 200
 
-        # Handle perintah batalkan cuti langsung (tanpa Dialogflow)
-        if text.lower() in ["batalkan cuti", "cancel cuti", "batal cuti", "/batalkan"]:
+        # Handle perintah langsung (tanpa Dialogflow)
+        text_lower = text.lower()
+
+        if text_lower in ["batalkan cuti", "cancel cuti", "batal cuti", "/batalkan"]:
             proses_batalkan_cuti(chat_id)
             return "ok", 200
 
+        # Cuti setengah hari
+        if "setengah hari" in text_lower or "half day" in text_lower:
+            karyawan = get_karyawan(chat_id)
+            if karyawan:
+                proses_cuti_setengah_hari(chat_id, karyawan, text)
+            else:
+                send_telegram(chat_id, f"❌ Data karyawan tidak ditemukan.\nTelegram ID Anda: {chat_id}")
+            return "ok", 200
+
+        # Rekap cuti
+        if "rekap" in text_lower:
+            karyawan = get_karyawan(chat_id)
+            if not karyawan:
+                send_telegram(chat_id, f"❌ Data karyawan tidak ditemukan.\nTelegram ID Anda: {chat_id}")
+                return "ok", 200
+
+            bulan = None
+            tahun = None
+
+            if "bulan ini" in text_lower:
+                bulan = datetime.now().month
+                tahun = datetime.now().year
+            else:
+                for key, val in BULAN_MAP.items():
+                    if key in text_lower:
+                        bulan = val
+                        break
+                tahun_match = re.search(r'(202\d|203\d)', text)
+                if tahun_match:
+                    tahun = int(tahun_match.group(1))
+
+            proses_rekap_bulanan(chat_id, bulan, tahun)
+            return "ok", 200
+
+        # Default: kirim ke Dialogflow
         intent, params, fulfillment = detect_intent(chat_id, text)
         process_intent(chat_id, intent, params, fulfillment, text)
 
